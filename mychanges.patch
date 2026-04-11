@@ -1,0 +1,1696 @@
+diff --git a/content/en/blog/_posts/2026-01-14-mutable-csi-node-allocatable-ga.md b/content/en/blog/_posts/2026-01-14-mutable-csi-node-allocatable-ga.md
+deleted file mode 100644
+index 49673f712c..0000000000
+--- a/content/en/blog/_posts/2026-01-14-mutable-csi-node-allocatable-ga.md
++++ /dev/null
+@@ -1,110 +0,0 @@
+----
+-layout: blog
+-title: "Kubernetes v1.36: Mutable CSI Node Allocatable Graduates to GA"
+-date: 2026-01-14T10:30:00-08:00
+-slug: kubernetes-v1-36-mutable-csi-node-allocatable-ga
+-draft: true
+-author: Eddie Torres (Amazon Web Services)
+----
+-
+-On behalf of Kubernetes SIG Storage, I am pleased to announce that the
+-_mutable CSI node allocatable count_ feature has graduated to General
+-Availability (GA) in Kubernetes v1.36!
+-
+-This feature, first introduced as alpha in Kubernetes v1.33 and promoted to beta in
+-v1.34, allows [Container Storage Interface
+-(CSI)](https://kubernetes-csi.github.io/docs/introduction.html) drivers to
+-dynamically update the reported maximum number of volumes that a node can handle.
+-This capability significantly enhances the accuracy of pod scheduling decisions
+-and reduces scheduling failures caused by outdated volume capacity information.
+-
+-## Background
+-
+-Traditionally, Kubernetes CSI drivers report a static maximum volume attachment
+-limit when initializing. However, actual attachment capacities can change during
+-a node's lifecycle for various reasons, such as:
+-
+-- Manual or external operations attaching/detaching volumes outside of Kubernetes control.
+-- Dynamically attached network interfaces or specialized hardware (GPUs, NICs,
+-  etc.) consuming available slots.
+-- Multi-driver scenarios, where one CSI driver's operations affect available
+-  capacity reported by another.
+-
+-Static reporting can cause Kubernetes to schedule pods onto nodes that appear to
+-have capacity but don't, leading to pods stuck in a `ContainerCreating` state.
+-
+-## Dynamically adapting CSI volume limits
+-
+-With this feature now GA, Kubernetes enables CSI drivers to dynamically adjust
+-and report node attachment capacities at runtime. This ensures that the
+-scheduler, as well as other components relying on this information, have the
+-most accurate, up-to-date view of node capacity.
+-
+-### How it works
+-
+-Kubernetes supports two mechanisms for updating the reported node volume limits:
+-
+-- **Periodic Updates:** CSI drivers specify an interval to periodically refresh
+-  the node's allocatable capacity.
+-- **Reactive Updates:** An immediate update triggered when a volume attachment
+-  fails due to exhausted resources (`ResourceExhausted` error).
+-
+-### Example CSI driver configuration
+-
+-Below is an example of configuring a CSI driver to enable periodic updates every 60 seconds:
+-
+-```yaml
+-apiVersion: storage.k8s.io/v1
+-kind: CSIDriver
+-metadata:
+-  name: example.csi.k8s.io
+-spec:
+-  nodeAllocatableUpdatePeriodSeconds: 60
+-```
+-
+-This configuration directs kubelet to periodically call the CSI driver's
+-`NodeGetInfo` method every 60 seconds, updating the node's allocatable volume
+-count. Kubernetes enforces a minimum update interval of 10 seconds to balance
+-accuracy and resource usage.
+-
+-### Immediate updates on attachment failures
+-
+-When a volume attachment operation fails due to a `ResourceExhausted` error
+-(gRPC code `8`), Kubernetes immediately updates the allocatable count instead of
+-waiting for the next periodic update. The kubelet then marks the affected pods
+-as Failed, enabling their controllers to recreate them. This prevents pods from
+-getting permanently stuck in the `ContainerCreating` state.
+-
+-## What's new in GA
+-
+-With the graduation to GA in Kubernetes v1.36, the
+-`MutableCSINodeAllocatableCount` feature gate is unconditionally enabled
+-and cannot be disabled. For any cluster running Kubernetes v1.36 or
+-later:
+-
+-- The `.spec.drivers[*].allocatable.count` field of a CSINode is
+-  mutable.
+-- The `nodeAllocatableUpdatePeriodSeconds` field is available in the
+-  CSIDriver spec.
+-
+-## Getting started
+-
+-To take advantage of this feature in your Kubernetes v1.36 cluster:
+-
+-1. Update your CSI driver configuration by setting
+-   `nodeAllocatableUpdatePeriodSeconds` to your desired update interval.
+-2. Monitor and observe improvements in scheduling accuracy and pod placement reliability.
+-
+-## References
+-
+-- [KEP-4876: Mutable CSI Node Allocatable Count](https://kep.k8s.io/4876)
+-- [Alpha Release Blog (v1.33)](/blog/2025/05/02/kubernetes-1-33-mutable-csi-node-allocatable-count/)
+-- [Beta Release Blog (v1.34)](/blog/2025/09/11/kubernetes-v1-34-mutable-csi-node-allocatable-count/)
+-
+-## Getting involved
+-
+-This feature was driven by the [SIG
+-Storage](https://github.com/kubernetes/community/tree/master/sig-storage)
+-community. Please join us to connect with the community and share your ideas
+-and feedback around the above feature and beyond. We look forward to hearing
+-from you!
+diff --git a/content/en/blog/_posts/2026/inplace-pod-level-resources-beta.md b/content/en/blog/_posts/2026/inplace-pod-level-resources-beta.md
+deleted file mode 100644
+index 4bcfe67ede..0000000000
+--- a/content/en/blog/_posts/2026/inplace-pod-level-resources-beta.md
++++ /dev/null
+@@ -1,112 +0,0 @@
+----
+-layout: blog
+-title: "Kubernetes v1.36: In-Place Vertical Scaling for Pod-Level Resources Graduates to Beta"
+-draft: true
+-slug: kubernetes-v1-36-inplace-pod-level-resources-beta
+-author: Narang Dixita Sohanlal (Google)
+----
+-
+-Following the graduation of Pod-Level Resources to Beta in v1.34 and the General Availability (GA) of In-Place Pod Vertical Scaling in v1.35, the Kubernetes community is thrilled to announce that **In-Place Pod-Level Resources Vertical Scaling has graduated to Beta in v1.36!**
+-
+-This feature is now enabled by default via the `InPlacePodLevelResourcesVerticalScaling` feature gate. It allows users to update the aggregate Pod resource budget (`.spec.resources`) for a running Pod, **often without requiring a container restart.**
+-
+-## Why Pod-level in-place resize?
+-
+-The Pod-level resource model simplified management for complex Pods (such as those with sidecars) by allowing containers to share a collective pool of resources. In v1.36, you can now adjust this aggregate boundary on-the-fly.
+-
+-This is particularly useful for Pods where containers do not have individual limits defined. These containers automatically scale their effective boundaries to fit the newly resized Pod-level dimensions, allowing you to expand the shared pool during peak demand without manual per-container recalculations.
+-
+-## Resource inheritance and the `resizePolicy`
+-
+-When a Pod-level resize is initiated, the Kubelet treats the change as a resize event for every container that inherits its limits from the Pod-level budget. To determine whether a restart is required, the Kubelet consults the `resizePolicy` defined within individual containers:
+-
+-*   **Non-disruptive Updates:** If a container's `restartPolicy` is set to `NotRequired`, the Kubelet attempts to update the cgroup limits dynamically via the Container Runtime Interface (CRI).
+-*   **Disruptive Updates:** If set to `RestartContainer`, the container will be restarted to apply the new aggregate boundary safely.
+-
+-> **Note:** Currently, `resizePolicy` is not supported at the Pod level. The Kubelet always defers to individual container settings to decide if an update can be applied in-place or requires a restart.
+-
+-## Example: ccaling a shared resource pool
+-
+-In this scenario, a Pod is defined with a 2 CPU pod-level limit. Because the individual containers do not have their own limits defined, they share this total pool.
+-
+-### 1. Initial Pod specification
+-
+-```yaml
+-apiVersion: v1
+-kind: Pod
+-metadata:
+-  name: shared-pool-app
+-spec:
+-  resources: # Pod-level limits
+-    limits:
+-      cpu: "2"
+-      memory: "4Gi"
+-  containers:
+-  - name: main-app
+-    image: my-app:v1
+-    resizePolicy: [{resourceName: "cpu", restartPolicy: "NotRequired"}]
+-  - name: sidecar
+-    image: logger:v1
+-    resizePolicy: [{resourceName: "cpu", restartPolicy: "NotRequired"}]
+-```
+-
+-### 2. The resize operation
+-
+-To double the CPU capacity to 4 CPUs, apply a patch using the `resize` subresource:
+-
+-```bash
+-kubectl patch pod shared-pool-app --subresource resize --patch \
+-  '{"spec":{"resources":{"limits":{"cpu":"4"}}}}'
+-```
+-
+-## Node-Level reality: feasibility and safety
+-
+-Applying a resize patch is only the first step. The Kubelet performs several checks and follows a specific sequence to ensure node stability:
+-
+-### 1. The feasibility check
+-
+-Before admitting a resize, the Kubelet verifies if the new aggregate request fits within the Node's allocatable capacity. If the Node is overcommitted, the resize is not ignored; instead, the `PodResizePending` condition will reflect a `Deferred` or `Infeasible` status, providing immediate feedback on why the "envelope" hasn't grown.
+-
+-### 2. Update sequencing
+-
+-To prevent resource "overshoot," the Kubelet coordinates the cgroup updates in a specific order:
+-*   **When Increasing:** The Pod-level cgroup is expanded first, creating the "room" before the individual container cgroups are enlarged.
+-*   **When Decreasing:** The container cgroups are throttled first, and only then is the aggregate Pod-level cgroup shrunken.
+-
+-## Observability: tracking resize status
+-
+-With the move to Beta, Kubernetes uses **Pod Conditions** to track the lifecycle of a resize:
+-
+-*   **`PodResizePending`**: The spec is updated, but the Node hasn't admitted the change (e.g., due to capacity).
+-*   **`PodResizeInProgress`**: The Node has admitted the resize (`status.allocatedResources`) but the changes aren't yet fully applied to the cgroups (`status.resources`).
+-
+-```yaml
+-status:
+-  allocatedResources:
+-    cpu: "4"
+-  resources:
+-    limits:
+-      cpu: "4"
+-  conditions:
+-  - type: PodResizeInProgress
+-    status: "True"
+-```
+-
+-## Constraints and requirements
+-
+-*   **cgroup v2 Only:** Required for accurate aggregate enforcement.
+-*   **CRI Support:** Requires a container runtime that supports the `UpdateContainerResources` CRI call (e.g., containerd v2.0+ or CRI-O).
+-*   **Feature Gates:** Requires `PodLevelResources`, `InPlacePodVerticalScaling`, `InPlacePodLevelResourcesVerticalScaling`, and `NodeDeclaredFeatures`.
+-*   **Linux Only:** Currently exclusive to Linux-based nodes.
+-
+-## What's next?
+-
+-As we move toward General Availability (GA), the community is focusing on **Vertical Pod Autoscaler (VPA) Integration**, enabling VPA to issue Pod-level resource recommendations and trigger in-place actuation automatically.
+-
+-## Getting started and providing feedback
+-
+-We encourage you to test this feature and provide feedback via the standard Kubernetes communication channels:
+-
+-*   Slack: [#sig-node](https://kubernetes.slack.com/messages/sig-node)
+-*   [Mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-node)
+-*   [Open Community Issues/PRs](https://github.com/kubernetes/community/labels/sig%2Fnode)
+diff --git a/content/en/docs/reference/kubectl/introduction.md b/content/en/docs/reference/kubectl/introduction.md
+index 3131e997cb..14cad12b92 100644
+--- a/content/en/docs/reference/kubectl/introduction.md
++++ b/content/en/docs/reference/kubectl/introduction.md
+@@ -4,7 +4,8 @@ content_type: concept
+ weight: 1
+ ---
+ 
+-kubectl is the Kubernetes cli version of a swiss army knife, and can do many things.
++kubectl is a command-line tool for interacting with Kubernetes clusters.
++Use it to deploy applications, inspect resources, and manage workloads.
+ 
+ While this Book is focused on using kubectl to declaratively manage applications in Kubernetes, it
+ also covers other kubectl functions.
+diff --git a/content/en/docs/reference/kubectl/kubectl.md b/content/en/docs/reference/kubectl/kubectl.md
+index bb6533c1d7..dec415ef6e 100644
+--- a/content/en/docs/reference/kubectl/kubectl.md
++++ b/content/en/docs/reference/kubectl/kubectl.md
+@@ -6,7 +6,7 @@ weight: 30
+ 
+ ## {{% heading "synopsis" %}}
+ 
+-kubectl controls the Kubernetes cluster manager.
++{{< glossary_definition term_id="kubectl" length="short" >}}
+ 
+ Find more information in [Command line tool](/docs/reference/kubectl/) (`kubectl`).
+ 
+diff --git a/content/ja/docs/concepts/overview/kubectl.md b/content/ja/docs/concepts/overview/kubectl.md
+deleted file mode 100644
+index fbb8afe02e..0000000000
+--- a/content/ja/docs/concepts/overview/kubectl.md
++++ /dev/null
+@@ -1,83 +0,0 @@
+----
+-title: kubectlコマンドラインツール
+-content_type: concept
+-description: >
+-  kubectlは、Kubernetesクラスターと通信するための主要なコマンドラインツールです。
+-  このページでは、kubectlとKubernetesエコシステムにおけるその役割について概要を説明します。
+-weight: 50
+-card:
+-  name: concepts
+-  title: kubectl
+-  weight: 40
+----
+-
+-<!-- overview -->
+-
+-{{< glossary_definition term_id="kubectl" length="short" >}}
+-
+-`kubectl`ツールは、[Kubernetes API](/docs/concepts/overview/kubernetes-api/)を通じてクラスターと通信します。
+-設定については、`kubectl`は`$HOME/.kube`ディレクトリ内の`config`という名前のファイルを探します。
+-`KUBECONFIG`環境変数を設定するか、[`--kubeconfig`](/docs/concepts/configuration/organize-cluster-access-kubeconfig/)フラグを設定することで、他の[kubeconfig](/docs/concepts/configuration/organize-cluster-access-kubeconfig/)ファイルを指定できます。
+-
+-<!-- body -->
+-
+-## kubectlの役割 {#role-of-kubectl}
+-
+-`kubectl`ツールは、Kubernetesオブジェクトの作成、検査、更新、削除を行うための主要なインターフェースです。
+-クラスター内部で実行される[Kubernetesコンポーネント](/docs/concepts/overview/components/)と、それらのコンポーネントが実装する[Kubernetes API](/docs/concepts/overview/kubernetes-api/)を補完するものです。
+-ノートパソコンから`kubectl`を実行する場合でも、クラスター内のPodから実行する場合でも、APIサーバーにリクエストを送信します。
+-[クライアントライブラリ](/docs/reference/using-api/client-libraries/)や[Headlamp](https://headlamp.dev/)のようなWebダッシュボードなど、他のクライアントも同じAPIを通じて通信します。
+-
+-## kubectlの仕組み {#how-kubectl-works}
+-
+-`kubectl`ツールは、[kubeconfig](/docs/concepts/configuration/organize-cluster-access-kubeconfig/)ファイルで定義されたクラスター、ユーザー、およびコンテキストを使用してAPIサーバーに接続し、認証を行います。
+-クラスターの外部から`kubectl`を実行する場合、kubeconfigファイルを使用してAPIサーバーのアドレスと認証情報を見つけます。
+-`kubectl`がPod内(例えばCI/CDパイプライン内)で実行される場合、PodにマウントされたServiceAccountトークンに基づくクラスター内認証を使用できます。
+-
+-コマンドを実行すると、`kubectl`はその意図を[Kubernetes API](/docs/concepts/overview/kubernetes-api/)への1つ以上のHTTPリクエストに変換します。
+-APIサーバーは各リクエストを検証し、{{< glossary_tooltip text="etcd" term_id="etcd" >}}に保存されたクラスターの状態に適用し、結果を返します。
+-これは、Deploymentの作成であってもログの読み取りであっても、すべての`kubectl`のアクションが同じAPIドリブンなパスを辿ることを意味します。
+-
+-kubeconfigでは複数のクラスター、ユーザー、コンテキストを定義できるため、環境を再設定することなく`kubectl`を使用してクラスター間を切り替えることができます。
+-`kubectl config use-context`を実行してアクティブなコンテキストを変更してください。
+-
+-## kubectlでできること {#what-you-can-do-with-kubectl}
+-
+-`kubectl`ツールは多くの操作をサポートしており、以下の大まかなカテゴリに分類されます:
+-
+-* **リソースの管理** – Pod、Deployment、Serviceなどのオブジェクトを作成、更新、削除します。
+-  設定ファイルによる宣言的な管理には`kubectl apply`を使用します。
+-* **クラスターの状態の検査** – オブジェクトの一覧表示と詳細表示、イベントの確認、リソース使用量のチェックを行います。
+-* **デバッグ** – コンテナからのログの確認、実行中のコンテナ内でのコマンドの実行、またはPodへのポートフォワードを行います。
+-* **クラスター操作** – メンテナンスのためにノードをドレインし、新しいワークロードを防ぐためにノードをcordonし、クラスターの設定を管理します。
+-* **スクリプトと自動化** – スクリプトやパイプラインで使用するために、出力をJSON、YAML、または[JSONPath](/docs/reference/kubectl/jsonpath/)を使用したカスタムカラム形式としてフォーマットします。
+-
+-構文、コマンドリファレンス、および例については、[kubectlリファレンスドキュメント](/docs/reference/kubectl/)を参照してください。
+-
+-## 宣言的管理と命令的管理 {#declarative-vs-imperative}
+-
+-本番ワークロードでは、バージョン管理された設定ファイルとともに`kubectl apply`を使用した[宣言的なオブジェクト管理](/docs/concepts/overview/working-with-objects/object-management/)を推奨します。
+-宣言的管理は、変更の追跡、コラボレーション、GitOpsワークフローとの統合に役立ちます。
+-命令的なコマンド(`kubectl create`や`kubectl run`など)は開発や実験には便利ですが、再現や監査が困難です。
+-
+-## プラグインによるkubectlの拡張 {#extending-kubectl-with-plugins}
+-
+-新しいサブコマンドを追加する[プラグイン](/docs/tasks/extend-kubectl/kubectl-plugins/)で`kubectl`を拡張できます。
+-プラグインは、`kubectl-<plugin-name>`の命名規則に従うスタンドアロンのバイナリです。
+-Kubernetesコミュニティは多くのプラグインをメンテナンスしており、[Krew](https://krew.sigs.k8s.io/)プラグインマネージャーで管理できます。
+-
+-## バージョン互換性 {#version-compatibility}
+-
+-`kubectl`ツールは、クラスターのコントロールプレーンに対して前後1マイナーバージョンのバージョンスキューをサポートしています。
+-例えば、`kubectl` v1.32はv1.31、v1.32、v1.33のコントロールプレーンで動作します。
+-互換性のあるバージョンを使用することで、予期しない動作を回避できます。
+-詳細については、[バージョンスキューポリシー](/releases/version-skew-policy/)を参照してください。
+-
+-## {{% heading "whatsnext" %}}
+-
+-* 構文とコマンドの詳細については、[kubectlリファレンス](/docs/reference/kubectl/)を読んでください。
+-* お使いのマシンに[kubectlをインストール](/docs/tasks/tools/#kubectl)してください。
+-* `kubectl`が使用する[Kubernetes API](/docs/concepts/overview/kubernetes-api/)について学んでください。
+-* クラスターを構成する[Kubernetesのコンポーネント](/docs/concepts/overview/components/)を確認してください。
+-* [オブジェクト管理](/docs/concepts/overview/working-with-objects/object-management/)や宣言的設定について調べてください。
+-* サポートされるバージョンの組み合わせについて[バージョンスキューポリシー](/releases/version-skew-policy/)を確認してください。
+diff --git a/content/ja/docs/tasks/configure-pod-container/configure-service-account.md b/content/ja/docs/tasks/configure-pod-container/configure-service-account.md
+deleted file mode 100644
+index e453409722..0000000000
+--- a/content/ja/docs/tasks/configure-pod-container/configure-service-account.md
++++ /dev/null
+@@ -1,473 +0,0 @@
+----
+-title: Podにサービスアカウントを設定する
+-content_type: task
+-weight: 120
+----
+-
+-Kubernetesは、クラスター内で実行されるクライアント、またはクラスターの{{< glossary_tooltip text="コントロールプレーン" term_id="control-plane" >}}と何らかの関係を持つクライアントが、{{< glossary_tooltip text="APIサーバー" term_id="kube-apiserver" >}}に対して認証を行うために、2つの異なる方法を提供しています。
+-
+-_サービスアカウント_ は、Pod内で実行されるプロセスにアイデンティティを提供し、ServiceAccountオブジェクトにマッピングされます。
+-APIサーバーに対して認証を行う際、あなたは特定の _ユーザー_ として自分自身を識別します。
+-Kubernetesはユーザーという概念を認識していますが、Kubernetes自体はUser APIを**持っていません**。
+-
+-このタスクガイドでは、Kubernetes APIに存在するServiceAccountについて説明します。
+-このガイドでは、PodにServiceAccountを設定する方法をいくつか示します。
+-
+-## {{% heading "prerequisites" %}}
+-
+-{{< include "task-tutorial-prereqs.md" >}}
+-
+-<!-- steps -->
+-
+-## デフォルトのサービスアカウントを使用してAPIサーバーにアクセスする {#use-the-default-service-account-to-access-the-api-server}
+-
+-PodがAPIサーバーに接続する際、Podは特定のServiceAccount(例: `default`)として認証を行います。
+-それぞれの{{< glossary_tooltip text="名前空間" term_id="namespace" >}}には、常に少なくとも1つのServiceAccountが存在します。
+-
+-すべてのKubernetes名前空間には、少なくとも1つのServiceAccountが含まれています。
+-それは、その名前空間のデフォルトのServiceAccountであり、`default`という名前が付けられています。
+-Podを作成する際にServiceAccountを指定しない場合、Kubernetesは自動的にその名前空間内に、`default`という名前のServiceAccountを割り当てます。
+-
+-作成したPodの詳細を取得するには、たとえば下記を実行します:
+-
+-```shell
+-kubectl get pods/<podname> -o yaml
+-```
+-
+-出力には、`spec.serviceAccountName`フィールドが表示されます。
+-Podを作成する際にこの値を指定しない場合、Kubernetesは自動的にこの値を設定します。
+-
+-Pod内で実行されているアプリケーションは、自動的にマウントされたサービスアカウントの認証情報を使用して、Kubernetes APIにアクセスできます。
+-詳細については、[クラスターへのアクセス](/docs/tasks/access-application-cluster/access-cluster/)を参照してください。
+-
+-PodがServiceAccountとして認証を行う場合、そのアクセスレベルは、使用する[認可プラグインとポリシー](/docs/reference/access-authn-authz/authorization/#authorization-modules)に依存します。
+-
+-ファイナライザーが設定されている場合でも、Podが削除されるとAPI認証情報は自動的に取り消されます。
+-具体的には、Podに設定された`.metadata.deletionTimestamp`(削除タイムスタンプは通常、**削除**リクエストが受け入れられた時刻にPodの終了猶予期間を加えた時刻です)から60秒後にAPI認証情報が取り消されます。
+-
+-### API認証情報の自動マウントをオプトアウトする {#opt-out-of-api-credential-automounting}
+-
+-{{< glossary_tooltip text="kubelet" term_id="kubelet" >}}が、ServiceAccountのAPI認証情報を自動的にマウントしないようにしたい場合、デフォルトの挙動をオプトアウトできます。
+-サービスアカウントに対して、`automountServiceAccountToken: false`を設定することで、`/var/run/secrets/kubernetes.io/serviceaccount/token`へのAPI認証情報の自動マウントをオプトアウトできます。
+-
+-例:
+-
+-```yaml
+-apiVersion: v1
+-kind: ServiceAccount
+-metadata:
+-  name: build-robot
+-automountServiceAccountToken: false
+-...
+-```
+-
+-また、特定のPodに対してAPI認証情報の自動マウントをオプトアウトすることもできます:
+-
+-```yaml
+-apiVersion: v1
+-kind: Pod
+-metadata:
+-  name: my-pod
+-spec:
+-  serviceAccountName: build-robot
+-  automountServiceAccountToken: false
+-  ...
+-```
+-
+-ServiceAccountとPodの`.spec`の両方が`automountServiceAccountToken`の値を指定している場合、Podの仕様が優先されます。
+-
+-## 複数のServiceAccountを使用する {#use-multiple-service-accounts}
+-
+-すべての名前空間には、少なくとも1つのServiceAccountが存在します。
+-それは、`default`という名前のデフォルトのServiceAccountリソースです。
+-[現在の名前空間](/docs/concepts/overview/working-with-objects/namespaces/#setting-the-namespace-preference)内のすべてのServiceAccountリソースを次のコマンドで一覧表示できます:
+-
+-```shell
+-kubectl get serviceaccounts
+-```
+-
+-出力は以下のようになります:
+-
+-```
+-NAME      SECRETS    AGE
+-default   1          1d
+-```
+-
+-次のように、追加のServiceAccountオブジェクトを作成できます:
+-
+-```shell
+-kubectl apply -f - <<EOF
+-apiVersion: v1
+-kind: ServiceAccount
+-metadata:
+-  name: build-robot
+-EOF
+-```
+-
+-ServiceAccountオブジェクトの名前は、有効な[DNSサブドメイン名](/docs/concepts/overview/working-with-objects/names#dns-subdomain-names)である必要があります。
+-
+-次のように、サービスアカウントオブジェクトの完全なダンプを取得する場合:
+-
+-```shell
+-kubectl get serviceaccounts/build-robot -o yaml
+-```
+-
+-出力は以下のようになります:
+-
+-```yaml
+-apiVersion: v1
+-kind: ServiceAccount
+-metadata:
+-  creationTimestamp: 2019-06-16T00:12:34Z
+-  name: build-robot
+-  namespace: default
+-  resourceVersion: "272500"
+-  uid: 721ab723-13bc-11e5-aec2-42010af0021e
+-```
+-
+-認可プラグインを使用して、[サービスアカウントに権限を設定](/docs/reference/access-authn-authz/rbac/#service-account-permissions)できます。
+-
+-デフォルト以外のサービスアカウントを使用するには、Podの`spec.serviceAccountName`フィールドを、使用したいServiceAccountの名前に設定します。
+-
+-`serviceAccountName`フィールドは、Podを作成する際、または新しいPodのテンプレート内でのみ設定できます。
+-既に存在するPodの`.spec.serviceAccountName`フィールドは更新できません。
+-
+-{{< note >}}
+-`.spec.serviceAccount`フィールドは、`.spec.serviceAccountName`の非推奨のエイリアスです。
+-ワークロードリソースからこれらのフィールドを削除したい場合は、[Podテンプレート](/docs/concepts/workloads/pods#pod-templates)で両方のフィールドを明示的に空に設定してください。
+-{{< /note >}}
+-
+-### クリーンアップ {#cleanup-use-multiple-service-accounts}
+-
+-上記の例で`build-robot` ServiceAccountを作成した場合、次のコマンドを実行してクリーンアップできます:
+-
+-```shell
+-kubectl delete serviceaccount/build-robot
+-```
+-
+-## ServiceAccountのAPIトークンを手動で作成する {#manually-create-an-api-token-for-a-serviceaccount}
+-
+-前述のように、「build-robot」という名前の既存のサービスアカウントがあるとします。
+-
+-`kubectl`を使用して、そのServiceAccountの期限付きAPIトークンを取得できます:
+-```shell
+-kubectl create token build-robot
+-```
+-
+-このコマンドの出力は、そのServiceAccountとして認証するために使用できるトークンです。
+-`kubectl create token`の`--duration`コマンドライン引数を使用して、特定のトークン期間を要求できます(発行されるトークンの実際の期間は短くなる場合や、長くなる場合もあります)。
+-
+-{{< feature-state feature_gate_name="ServiceAccountTokenNodeBinding" >}}
+-
+-`kubectl` v1.31以降を使用すると、ノードに直接バインドされたサービスアカウントトークンを作成できます:
+-
+-```shell
+-kubectl create token build-robot --bound-object-kind Node --bound-object-name node-001 --bound-object-uid 123...456
+-```
+-
+-トークンは、有効期限が切れるか、関連するノードまたはサービスアカウントが削除されるまで有効です。
+-
+-{{< note >}}
+-Kubernetes v1.22以前のバージョンでは、Kubernetes APIにアクセスするための長期的な認証情報が自動的に作成されていました。
+-この古いメカニズムは、実行中のPodにマウントされるトークンSecretの作成に基づいていました。
+-Kubernetes v{{< skew currentVersion >}}を含む最近のバージョンでは、API認証情報は[TokenRequest](/docs/reference/kubernetes-api/authentication-resources/token-request-v1/) APIを使用して直接取得され、[projected volume](/docs/reference/access-authn-authz/service-accounts-admin/#bound-service-account-token-volume)を使用してPodにマウントされます。
+-この方法で取得されたトークンには有効期限があり、マウント先のPodが削除されると自動的に無効になります。
+-
+-サービスアカウント用のトークンSecretを手動で作成することも可能です。
+-例えば、有効期限のないトークンが必要な場合などです。
+-ただし、APIにアクセスするためのトークンを取得するには、[TokenRequest](/docs/reference/kubernetes-api/authentication-resources/token-request-v1/)サブリソースを使用することを推奨します。
+-{{< /note >}}
+-
+-### ServiceAccount用の長期間有効なAPIトークンを手動で作成する {#manually-create-a-long-lived-api-token-for-a-serviceaccount}
+-
+-ServiceAccount用のAPIトークンを取得したい場合は、特別なアノテーション`kubernetes.io/service-account.name`を持つ新しいSecretを作成します。
+-
+-```shell
+-kubectl apply -f - <<EOF
+-apiVersion: v1
+-kind: Secret
+-metadata:
+-  name: build-robot-secret
+-  annotations:
+-    kubernetes.io/service-account.name: build-robot
+-type: kubernetes.io/service-account-token
+-EOF
+-```
+-
+-Secretを表示するには、次のコマンドを使用します:
+-
+-```shell
+-kubectl get secret/build-robot-secret -o yaml
+-```
+-
+-Secretに「build-robot」ServiceAccount用のAPIトークンが含まれていることが確認できます。
+-
+-設定したアノテーションにより、コントロールプレーンはそのServiceAccount用のトークンを自動的に生成し、関連するSecretに保存します。
+-また、コントロールプレーンは削除されたServiceAccount用のトークンをクリーンアップします。
+-
+-```shell
+-kubectl describe secrets/build-robot-secret
+-```
+-
+-出力は以下のようになります:
+-
+-```
+-Name:           build-robot-secret
+-Namespace:      default
+-Labels:         <none>
+-Annotations:    kubernetes.io/service-account.name: build-robot
+-                kubernetes.io/service-account.uid: da68f9c6-9d26-11e7-b84e-002dc52800da
+-
+-Type:   kubernetes.io/service-account-token
+-
+-Data
+-====
+-ca.crt:         1338 bytes
+-namespace:      7 bytes
+-token:          ...
+-```
+-
+-{{< note >}}
+-`token`の内容はここでは省略されています。
+-
+-ターミナルやコンピューターの画面が覗き見される可能性がある場所で、`kubernetes.io/service-account-token` Secretの内容を表示しないよう注意してください。
+-{{< /note >}}
+-
+-関連するSecretを持つServiceAccountを削除すると、KubernetesコントロールプレーンはそのSecretから長期的なトークンを自動的にクリーンアップします。
+-
+-{{< note >}}
+-ServiceAccountを表示するには、次のコマンドを使用します:
+-
+-` kubectl get serviceaccount build-robot -o yaml`
+-
+-ServiceAccount APIオブジェクトの[`.secrets`](/docs/reference/kubernetes-api/authentication-resources/service-account-v1/)フィールドに`build-robot-secret` Secretは表示されません。
+-このフィールドには自動生成されたSecretのみが入力されるためです。
+-{{< /note >}}
+-
+-## サービスアカウントにImagePullSecretを追加する {#add-imagepullsecrets-to-a-service-account}
+-
+-まず、[imagePullSecretを作成](/docs/concepts/containers/images/#specifying-imagepullsecrets-on-a-pod)します。
+-次に、作成されたことを確認します。
+-以下は、その例です:
+-
+-- [PodでのImagePullSecretの指定](/docs/concepts/containers/images/#specifying-imagepullsecrets-on-a-pod)で説明されているように、imagePullSecretを作成します。
+-
+-  ```shell
+-    kubectl create secret docker-registry myregistrykey --docker-server=<レジストリ名> \
+-            --docker-username=DUMMY_USERNAME --docker-password=DUMMY_DOCKER_PASSWORD \
+-            --docker-email=DUMMY_DOCKER_EMAIL
+-  ```
+-
+-- 作成されたことを確認します。
+-
+-  ```shell
+-    kubectl get secrets myregistrykey
+-  ```
+-
+-  出力は以下のようになります:
+-
+-  ```
+-    NAME             TYPE                              DATA    AGE
+-    myregistrykey    kubernetes.io/.dockerconfigjson   1       1d
+-  ```
+-
+-### サービスアカウントにイメージプルシークレットを追加する {#add-image-pull-secret-to-service-account}
+-
+-次に、名前空間のデフォルトのサービスアカウントを変更して、このSecretをimagePullSecretとして使用するようにします。
+-
+-```shell
+-kubectl patch serviceaccount default -p '{"imagePullSecrets": [{"name": "myregistrykey"}]}'
+-```
+-
+-オブジェクトを手動で編集することでも同じ結果を得られます:
+-
+-```shell
+-kubectl edit serviceaccount/default
+-```
+-
+-`sa.yaml`ファイルの出力は以下のようになります:
+-
+-使用しているテキストエディターが開き、以下のような設定が表示されます:
+-
+-```yaml
+-apiVersion: v1
+-kind: ServiceAccount
+-metadata:
+-  creationTimestamp: 2021-07-07T22:02:39Z
+-  name: default
+-  namespace: default
+-  resourceVersion: "243024"
+-  uid: 052fb0f4-3d50-11e5-b066-42010af0d7b6
+-```
+-
+-エディターを使用して、`resourceVersion`キーが記述されている行を削除し、`imagePullSecrets:`の行を追加して保存します。
+-`uid`の値は変更しないでおきます。
+-
+-これらの変更を行うと、編集後のServiceAccountは以下のようになります:
+-
+-```yaml
+-apiVersion: v1
+-kind: ServiceAccount
+-metadata:
+-  creationTimestamp: 2021-07-07T22:02:39Z
+-  name: default
+-  namespace: default
+-  uid: 052fb0f4-3d50-11e5-b066-42010af0d7b6
+-imagePullSecrets:
+-  - name: myregistrykey
+-```
+-
+-### 新しいPodにimagePullSecretが設定されていることを確認する {#verify-that-imagepullsecrets-are-set-for-new-pods}
+-
+-現在の名前空間に、デフォルトのServiceAccountを使用して新しいPodが作成されると、新しいPodの`spec.imagePullSecrets`フィールドが自動的に設定されます:
+-
+-```shell
+-kubectl run nginx --image=<レジストリ名>/nginx --restart=Never
+-kubectl get pod nginx -o=jsonpath='{.spec.imagePullSecrets[0].name}{"\n"}'
+-```
+-
+-出力は以下のようになります:
+-
+-```
+-myregistrykey
+-```
+-
+-## ServiceAccountトークンボリューム投影 {#serviceaccount-token-volume-projection}
+-
+-{{< feature-state for_k8s_version="v1.20" state="stable" >}}
+-
+-{{< note >}}
+-トークンリクエスト投影を有効化して使用するには、`kube-apiserver`に以下の各コマンドライン引数を指定する必要があります:
+-
+-`--service-account-issuer`
+-: サービスアカウントトークン発行者の識別子を定義します。
+-  `--service-account-issuer`引数は複数回指定でき、発行者をダウンタイムなしで変更するのに役立ちます。
+-  このフラグを複数回指定した場合、最初のものがトークンの生成に使用され、すべてが受け入れ可能な発行者の判定に使用されます。
+-  `--service-account-issuer`を複数回指定するには、Kubernetes v1.22以降を実行する必要があります。
+-
+-`--service-account-key-file`
+-: ServiceAccountトークンの検証に使用される、PEMエンコードされたX.509秘密鍵または公開鍵(RSAまたはECDSA)を含むファイルのパスを指定します。
+-  指定したファイルには複数の鍵を含めることができ、フラグは異なるファイルで複数回指定できます。
+-  複数回指定された場合、指定された鍵のいずれかで署名されたトークンは、Kubernetes APIサーバーによって有効と見なされます。
+-
+-`--service-account-signing-key-file`
+-: サービスアカウントトークン発行者の現在の秘密鍵を含むファイルのパスを指定します。
+-  発行者はこの秘密鍵を使用して発行されたIDトークンに署名します。
+-
+-`--api-audiences`(省略可能)
+-: ServiceAccountトークンのオーディエンスを定義します。
+-  サービスアカウントトークン認証機能は、APIに対して使用されるトークンが、これらのオーディエンスの少なくとも1つにバインドされていることを検証します。
+-  `api-audiences`を複数回指定した場合、指定したオーディエンスのいずれかに対応するトークンは、Kubernetes APIサーバーによって有効と見なされます。
+-  `--service-account-issuer`コマンドライン引数を指定しても`--api-audiences`を設定しない場合、コントロールプレーンはデフォルトで発行者URLのみを含むオーディエンスリストを使用します。
+-
+-{{< /note >}}
+-
+-kubeletも、ServiceAccountトークンをPodに投影できます。
+-トークンの望ましいプロパティ(オーディエンスや有効期間など)を指定できます。
+-これらのプロパティは、デフォルトのServiceAccountトークンでは設定 _できません_。
+-また、PodまたはServiceAccountのいずれかが削除されると、トークンはAPIに対して無効になります。
+-
+-この挙動は、`ServiceAccountToken`と呼ばれる[投影ボリューム](/docs/concepts/storage/volumes/#projected)タイプを使用してPodの`spec`で設定できます。
+-
+-この投影ボリュームのトークンは{{<glossary_tooltip term_id="jwt" text="JSON Web Token">}}(JWT)です。
+-このトークンのJSONペイロードは明確に定義されたスキーマに従い、以下はPodにバインドされたトークンのペイロードの例です:
+-
+-```yaml
+-{
+-  "aud": [  # リクエストされたオーディエンス、または明示的にリクエストされない場合はAPIサーバーのデフォルトオーディエンスと一致
+-    "https://kubernetes.default.svc"
+-  ],
+-  "exp": 1731613413,
+-  "iat": 1700077413,
+-  "iss": "https://kubernetes.default.svc",  # --service-account-issuerフラグに渡された最初の値と一致
+-  "jti": "ea28ed49-2e11-4280-9ec5-bc3d1d84661a", 
+-  "kubernetes.io": {
+-    "namespace": "kube-system",
+-    "node": {
+-      "name": "127.0.0.1",
+-      "uid": "58456cb0-dd00-45ed-b797-5578fdceaced"
+-    },
+-    "pod": {
+-      "name": "coredns-69cbfb9798-jv9gn",
+-      "uid": "778a530c-b3f4-47c0-9cd5-ab018fb64f33"
+-    },
+-    "serviceaccount": {
+-      "name": "coredns",
+-      "uid": "a087d5a0-e1dd-43ec-93ac-f13d89cd13af"
+-    },
+-    "warnafter": 1700081020
+-  },
+-  "nbf": 1700077413,
+-  "sub": "system:serviceaccount:kube-system:coredns"
+-}
+-```
+-
+-### サービスアカウントトークン投影を使用してPodを起動する {#launch-a-pod-using-service-account-token-projection}
+-
+-オーディエンスが`vault`で、有効期間が2時間のトークンをPodに提供するには、以下のようなPodマニフェストを定義します:
+-
+-{{% code_sample file="pods/pod-projected-svc-token.yaml" %}}
+-
+-Podを作成します:
+-
+-```shell
+-kubectl create -f https://k8s.io/examples/pods/pod-projected-svc-token.yaml
+-```
+-
+-kubeletは、Podに代わってトークンをリクエストして保存し、設定可能なファイルパスでPodがトークンを利用できるようにします。
+-また、トークンの有効期限が近づくと更新します。
+-kubeletは、トークンの全生存時間(TTL)の80%を経過した場合、または24時間を経過した場合に、積極的にトークンのローテーションをリクエストします。
+-
+-トークンがローテーションされた際にトークンを再読み込みするのは、アプリケーション側の責任です。
+-多くの場合、実際の有効期限を追跡しなくても、定期的に(例えば5分ごとに)トークンを読み込むだけで十分です。
+-
+-### サービスアカウント発行者のディスカバリ {#service-account-issuer-discovery}
+-
+-{{< feature-state for_k8s_version="v1.21" state="stable" >}}
+-
+-クラスター内のServiceAccountに対して[トークン投影](#serviceaccount-token-volume-projection)を有効にしている場合、ディスカバリ機能も利用できます。
+-Kubernetesは、クライアントが _アイデンティティプロバイダー_ として連携できる方法を提供し、1つ以上の外部システムが _リライングパーティ_ として機能できます。
+-
+-{{< note >}}
+-発行者URLは[OIDC Discovery仕様](https://openid.net/specs/openid-connect-discovery-1_0.html)に準拠している必要があります。
+-実際には、これは`https`スキームを使用する必要があり、`{service-account-issuer}/.well-known/openid-configuration`でOpenIDプロバイダー設定を提供する必要があることを意味します。
+-
+-URLが準拠していない場合、ServiceAccount発行者のディスカバリエンドポイントは登録されず、アクセスできません。
+-{{< /note >}}
+-
+-有効にすると、Kubernetes APIサーバーはHTTP経由でOpenIDプロバイダー設定ドキュメントを公開します。
+-設定ドキュメントは`/.well-known/openid-configuration`で公開されます。
+-OpenIDプロバイダー設定は、_ディスカバリドキュメント_ と呼ばれることもあります。
+-Kubernetes APIサーバーは、関連するJSON Web Key Set(JWKS)もHTTP経由で`/openid/v1/jwks`で公開します。
+-
+-{{< note >}}
+-`/.well-known/openid-configuration`や`/openid/v1/jwks`で提供される応答は、OIDC互換となるように設計されていますが、厳密にはOIDC準拠ではありません。
+-これらのドキュメントには、Kubernetesサービスアカウントトークンの検証を実行するために必要なパラメーターのみが含まれています。
+-{{< /note >}}
+-
+-{{< glossary_tooltip text="RBAC" term_id="rbac">}}を使用するクラスターには、`system:service-account-issuer-discovery`というデフォルトのClusterRoleが含まれています。
+-デフォルトのClusterRoleBindingは、このロールを`system:serviceaccounts`グループに割り当てます。
+-すべてのServiceAccountは暗黙的にこのグループに属しています。
+-これにより、クラスター上で実行されているPodは、マウントされたサービスアカウントトークンを介してサービスアカウントディスカバリドキュメントにアクセスできます。
+-管理者は、セキュリティ要件や連携する予定の外部システムに応じて、さらに`system:authenticated`または`system:unauthenticated`にロールをバインドすることもできます。
+-
+-JWKS応答には、リライングパーティがKubernetesサービスアカウントトークンを検証するために使用できる公開鍵が含まれています。
+-リライングパーティは、まずOpenIDプロバイダー設定をクエリし、応答内の`jwks_uri`フィールドを使用してJWKSを見つけます。
+-
+-多くの場合、Kubernetes APIサーバーはパブリックインターネット上では利用できませんが、APIサーバーからのキャッシュされた応答を提供するパブリックエンドポイントをユーザーまたはサービスプロバイダーが利用可能にすることができます。
+-これらの場合、APIサーバーに`--service-account-jwks-uri`フラグを渡すことで、OpenIDプロバイダー設定内の`jwks_uri`をオーバーライドして、APIサーバーのアドレスではなくパブリックエンドポイントを指すようにすることができます。
+-発行者URLと同様に、JWKS URIも`https`スキームを使用する必要があります。
+-
+-## {{% heading "whatsnext" %}}
+-
+-以下も参照してください:
+-
+-- [サービスアカウントのクラスター管理者ガイド](/docs/reference/access-authn-authz/service-accounts-admin/)を読む
+-- [Kubernetesでの認可](/docs/reference/access-authn-authz/authorization/)について読む
+-- [Secret](/docs/concepts/configuration/secret/)について読む
+-  - または、[Secretを使用して認証情報を安全に配布する](/docs/tasks/inject-data-application/distribute-credentials-secure/)方法を学ぶ
+-  - ただし、ServiceAccountとして認証するためにSecretを使用することは非推奨であることに注意してください。
+-    推奨される代替方法は[ServiceAccountトークンボリューム投影](#serviceaccount-token-volume-projection)です。
+-- [投影ボリューム](/docs/tasks/configure-pod-container/configure-projected-volume-storage/)について読む
+-- OIDCディスカバリの背景については、[Service Account signing key retrieval](https://github.com/kubernetes/enhancements/tree/master/keps/sig-auth/1393-oidc-discovery) Kubernetes Enhancement Proposalを読む
+-- [OIDC Discovery仕様](https://openid.net/specs/openid-connect-discovery-1_0.html)を読む
+diff --git a/content/ko/docs/concepts/workloads/workload-api/_index.md b/content/ko/docs/concepts/workloads/workload-api/_index.md
+deleted file mode 100644
+index 0ba012717e..0000000000
+--- a/content/ko/docs/concepts/workloads/workload-api/_index.md
++++ /dev/null
+@@ -1,71 +0,0 @@
+----
+-title: "워크로드 API"
+-weight: 20
+-simple_list: true
+----
+-
+-<!-- overview -->
+-{{< feature-state feature_gate_name="GenericWorkload" >}}
+-
+-워크로드 API 리소스를 사용하여 멀티 파드 애플리케이션에 대한 스케줄링 요구 사항과 구조를 기술할 수 있다.
+-워크로드 컨트롤러가 워크로드에 대한 런타임 동작을 제공하는 반면,
+-워크로드 API는 잡(Job) 등과 같은 "실제" 워크로드에 대한 스케줄링 제약 조건을 제공하기 위한 것이다.
+-
+-<!-- body -->
+-
+-## 워크로드란?
+-
+-워크로드 API 리소스는 `scheduling.k8s.io/v1alpha1`
+-{{< glossary_tooltip text="API 그룹" term_id="api-group" >}}에 속하며
+-(이 API를 사용하려면 클러스터에서 해당 API 그룹과 `GenericWorkload`
+-[기능 게이트](/docs/reference/command-line-tools-reference/feature-gates/)가
+-활성화되어 있어야 한다).
+-이 리소스는 멀티 파드 애플리케이션의 스케줄링 요구 사항을
+-구조화하고 기계가 읽을 수 있는 형태로 정의한다. [잡](/docs/concepts/workloads/controllers/job/)과
+-같은 사용자 대상 워크로드가 무엇을 실행할지 정의하는 반면, 워크로드 리소스는
+-파드 그룹이 어떻게 스케줄링되어야 하는지와 라이프사이클 전반에 걸쳐
+-배치가 어떻게 관리되어야 하는지를 결정한다.
+-
+-## API 구조
+-
+-워크로드를 사용하면 파드 그룹을 정의하고 스케줄링 정책을 적용할 수 있다.
+-파드 그룹 목록과 컨트롤러에 대한 참조, 두 부분으로 구성된다.
+-
+-### 파드 그룹
+-
+-`podGroups` 목록은 워크로드의 개별 구성 요소를 정의한다.
+-예를 들어, 머신 러닝 잡에는 `driver` 그룹과 `worker` 그룹이 있을 수 있다.
+-
+-`podGroups`의 각 항목에는 다음이 필요하다.
+-1. 파드의 [워크로드 참조](/docs/concepts/workloads/pods/workload-reference/)에서 사용할 수 있는 고유한 `name`.
+-2. [스케줄링 정책](/docs/concepts/workloads/workload-api/policies/) (`basic` 또는 `gang`).
+-
+-```yaml
+-apiVersion: scheduling.k8s.io/v1alpha1
+-kind: Workload
+-metadata:
+-  name: training-job-workload
+-  namespace: some-ns
+-spec:
+-  controllerRef:
+-    apiGroup: batch
+-    kind: Job
+-    name: training-job
+-  podGroups:
+-  - name: workers
+-    policy:
+-      gang:
+-        # 4개의 파드가 동시에 실행될 수 있는 경우에만 gang을 스케줄링할 수 있다
+-        minCount: 4
+-```
+-
+-### 워크로드 제어 오브젝트 참조
+-
+-`controllerRef` 필드는 [잡](/docs/concepts/workloads/controllers/job/)이나 사용자 정의 CRD와 같이 애플리케이션을 정의하는 특정 상위 오브젝트에 워크로드를 연결한다. 이 필드는 가시성(observability)과 도구 연동에 유용하다.
+-이 데이터는 워크로드를 스케줄링하거나 관리하는 데 사용되지 않는다.
+-
+-## {{% heading "whatsnext" %}}
+-
+-* 파드에서 [워크로드 참조](/docs/concepts/workloads/pods/workload-reference/)하는 방법을 확인한다.
+-* [파드 그룹 정책](/docs/concepts/workloads/workload-api/policies/)에 대해 알아본다.
+-* [갱 스케줄링(gang scheduling)](/docs/concepts/scheduling-eviction/gang-scheduling/) 알고리즘에 대해 읽어본다.
+diff --git a/content/pl/docs/concepts/workloads/_index.md b/content/pl/docs/concepts/workloads/_index.md
+index aae866af5f..fca26547c6 100644
+--- a/content/pl/docs/concepts/workloads/_index.md
++++ b/content/pl/docs/concepts/workloads/_index.md
+@@ -10,11 +10,11 @@ card:
+   weight: 60
+ ---
+ 
+-{{< glossary_definition term_id="workload" length="short" >}}
+-Niezależnie od tego, czy Twój workload jest pojedynczym komponentem, czy kilkoma współpracującymi ze sobą,
+-na Kubernetesie uruchamiasz go wewnątrz zestawu
+-[_podów_](/docs/concepts/workloads/pods). Pod reprezentuje zbiór składający się z jednego lub więcej
+-uruchomionych {{< glossary_tooltip text="kontenerów" term_id="container" >}} na Twoim klastrze.
++{{< glossary_definition term_id="workload" length="short" >}} Niezależnie
++od tego, czy Twój workload jest pojedynczym komponentem, czy kilkoma
++współpracującymi ze sobą, na Kubernetes uruchamiasz go wewnątrz zestawu
++[_podów_](/docs/concepts/workloads/pods). Pod reprezentuje zestaw uruchomionych
++{{< glossary_tooltip text="kontenerów" term_id="container" >}} na Twoim klastrze.
+ 
+ Pody mają [zdefiniowany cykl życia](/docs/concepts/workloads/pods/pod-lifecycle/). Na
+ przykład, gdy Pod działa w twoim klastrze, krytyczna awaria na
+diff --git a/content/zh-cn/blog/_posts/2026/announcing-checkpoint-restore-wg.md b/content/zh-cn/blog/_posts/2026/announcing-checkpoint-restore-wg.md
+deleted file mode 100644
+index b4e6a86a66..0000000000
+--- a/content/zh-cn/blog/_posts/2026/announcing-checkpoint-restore-wg.md
++++ /dev/null
+@@ -1,113 +0,0 @@
+----
+-title: "宣布成立 Checkpoint/Restore 工作组"
+-date: 2026-01-21T10:00:00-08:00
+-canonicalUrl: https://www.kubernetes.dev/blog/2026/01/21/introducing-checkpoint-restore-wg/
+-slug: introducing-checkpoint-restore-wg
+-author: >
+-  [Radostin Stoyanov](https://github.com/rst0git),
+-  [Viktória Spišaková](https://github.com/viktoriaas),
+-  [Adrian Reber](https://github.com/adrianreber),
+-  [Peter Hunt](https://github.com/haircommander)
+-translator: >
+-  [Xin Li](https://github.com/my-git9)
+----
+-<!--
+-title: "Announcing the Checkpoint/Restore Working Group"
+-date: 2026-01-21T10:00:00-08:00
+-canonicalUrl: https://www.kubernetes.dev/blog/2026/01/21/introducing-checkpoint-restore-wg/
+-slug: introducing-checkpoint-restore-wg
+-author: >
+-  [Radostin Stoyanov](https://github.com/rst0git),
+-  [Viktória Spišaková](https://github.com/viktoriaas),
+-  [Adrian Reber](https://github.com/adrianreber),
+-  [Peter Hunt](https://github.com/haircommander)
+--->
+-
+-<!--
+-The community around Kubernetes includes a number of Special Interest Groups (SIGs) and Working Groups (WGs) facilitating discussions on important topics between interested contributors. Today we would like to announce the new [Kubernetes Checkpoint Restore WG](https://github.com/kubernetes/community/tree/master/wg-checkpoint-restore) focusing on the integration of Checkpoint/Restore functionality into Kubernetes.
+--->
+-Kubernetes 社区包含多个特别兴趣小组（SIG）和工作组（WG），
+-旨在促进感兴趣的贡献者之间就重要议题展开讨论。
+-今天，我们宣布成立新的
+-[Kubernetes Checkpoint Restore WG](https://github.com/kubernetes/community/tree/master/wg-checkpoint-restore)，
+-专注于将 Checkpoint/Restore 功能集成到 Kubernetes 中。
+-
+-<!--
+-## Motivation and use cases
+-
+-There are several high-level scenarios discussed in the working group:
+--->
+-## 动机和应用场景
+-
+-工作组讨论了以下几个高层次的应用场景：
+-
+-<!--
+-- Optimizing resource utilization for interactive workloads, such as Jupyter notebooks and AI chatbots
+-- Accelerating startup of applications with long initialization times, including Java applications and [LLM inference services](https://doi.org/10.1145/3731599.3767354)
+-- Using periodic checkpointing to enable fault-tolerance for long-running workloads, such as distributed model training
+-- Providing [interruption-aware scheduling](https://doi.org/10.1007/978-3-032-10507-3_3) with transparent checkpoint/restore, allowing lower-priority Pods to be preempted while preserving the runtime state of applications
+-- Facilitating Pod migration across nodes for load balancing and maintenance, without disrupting workloads.
+-- Enabling forensic checkpointing to investigate and analyze security incidents such as cyberattacks, data breaches, and unauthorized access.
+--->
+-- 优化交互式工作负载（例如 Jupyter Notebook 和 AI 聊天机器人）的资源利用率
+-- 加速初始化时间较长的应用程序启动，包括 Java 应用程序和 [LLM 推理服务](https://doi.org/10.1145/3731599.3767354)
+-- 使用周期性 Checkpoint 机制，为长时间运行的工作负载（例如分布式模型训练）提供容错能力
+-- 提供具有透明 Checkpoint/Restore 功能的[中断感知调度](https://doi.org/10.1007/978-3-032-10507-3_3)，
+-  允许抢占低优先级 Pod，同时保持应用程序的运行时状态
+-- 促进 Pod 跨节点迁移，以实现负载均衡和维护，而不会中断工作负载
+-- 启用 Checkpoint 取证功能，用于调查和分析安全事件，例如网络攻击、数据泄露和未经授权的访问。
+-
+-<!--
+-Across these scenarios, the goal is to help facilitate discussions of ideas between the Kubernetes community and the growing Checkpoint/Restore in Userspace (CRIU) ecosystem. The CRIU community includes several projects that support these use cases, including:
+--->
+-在这些场景中，目标是促进 Kubernetes 社区与日益壮大的用户空间
+-Checkpoint/Restore（CRIU）生态系统之间的思想交流。CRIU 社区包含多个支持这些用例的项目，其中包括：
+-
+-<!--
+-- [CRIU](https://github.com/checkpoint-restore/criu) - A tool for checkpointing and restoring running applications and containers
+-- [checkpointctl](https://github.com/checkpoint-restore/checkpointctl) - A tool for in-depth analysis of container checkpoints
+-- [criu-coordinator](https://github.com/checkpoint-restore/criu-coordinator) - A tool for coordinated checkpoint/restore of distributed applications with CRIU
+-- [checkpoint-restore-operator](https://github.com/checkpoint-restore/checkpoint-restore-operator) - A Kubernetes operator for managing checkpoints
+--->
+-- [CRIU](https://github.com/checkpoint-restore/criu) - 用于对运行中的应用程序和容器进行 Checkpoint 维护和 Restore 的工具
+-- [checkpointctl](https://github.com/checkpoint-restore/checkpointctl) - 用于深入分析容器 Checkpoint 的工具
+-- [criu-coordinator](https://github.com/checkpoint-restore/criu-coordinator) - 用于与 CRIU 协同执行分布式应用程序 Checkpoint/Restore 的工具
+-- [checkpoint-restore-operator](https://github.com/checkpoint-restore/checkpoint-restore-operator) - 用于管理 Checkpoint 的 Kubernetes Operator
+-
+-<!--
+-More information about the checkpoint/restore integration with Kubernetes is also available [here](https://criu.org/Kubernetes).
+--->
+-有关 Kubernetes 的 Checkpoint/Restore 集成的更多信息，请参阅[此处](https://criu.org/Kubernetes)。
+-
+-<!--
+-## Related events
+-
+-Following our presentation about [transparent checkpointing](https://sched.co/1tx7i) at KubeCon EU 2025, we are excited to welcome you to our [panel discussion](https://sched.co/2CW6P) and [AI + ML session](https://sched.co/2CW7Z) at KubeCon + CloudNativeCon Europe 2026.
+--->
+-## 相关活动
+-
+-继我们在 KubeCon EU 2025 上就[透明 Checkpoint](https://sched.co/1tx7i)
+-发表演讲之后，我们非常高兴地邀请你参加我们在
+-KubeCon + CloudNativeCon Europe 2026
+-上的[小组讨论](https://sched.co/2CW6P)和[人工智能 + 机器学习专题研讨会](https://sched.co/2CW7Z)。
+-
+-
+-<!--
+-## Connect with us
+-
+-If you are interested in contributing to Kubernetes or CRIU, there are several ways to participate:
+--->
+-## 联系我们
+-
+-如果你有兴趣为 Kubernetes 或 CRIU 做贡献，可以通过以下几种方式参与：
+-
+-<!--
+-- Join our meeting every second Thursday at 17:00 UTC via the Zoom link in our [meeting notes](https://docs.google.com/document/d/1ZMtHBibXfTw4cQerM4O4DJonzVs3W7Hp2K5ml6pTufs/edit); recordings of our prior meetings are available [here](https://www.youtube.com/playlist?list=PL69nYSiGNLP1P7F40IMVL3NsNiIm5AGos).
+-- Chat with us on the [Kubernetes Slack](http://slack.k8s.io/): [#wg-checkpoint-restore](https://kubernetes.slack.com/messages/wg-checkpoint-restore)
+-- Email us at the [wg-checkpoint-restore mailing list](https://groups.google.com/a/kubernetes.io/g/wg-checkpoint-restore)
+--->
+-- 请于每隔一周的周四 17:00 UTC 通过[会议记录](https://docs.google.com/document/d/1ZMtHBibXfTw4cQerM4O4DJonzVs3W7Hp2K5ml6pTufs/edit)中的
+-  Zoom 链接加入我们的会议；之前的会议录像可在[此处](https://www.youtube.com/playlist?list=PL69nYSiGNLP1P7F40IMVL3NsNiIm5AGos)观看。
+-- 在 [Kubernetes Slack](http://slack.k8s.io/)
+-  上与我们交流：[#wg-checkpoint-restore](https://kubernetes.slack.com/messages/wg-checkpoint-restore)
+-- 发送邮件至 [wg-checkpoint-restore 邮件列表](https://groups.google.com/a/kubernetes.io/g/wg-checkpoint-restore)
+diff --git a/content/zh-cn/blog/_posts/2026/ingress-nginx-statement.md b/content/zh-cn/blog/_posts/2026/ingress-nginx-statement.md
+deleted file mode 100644
+index 98de93bdca..0000000000
+--- a/content/zh-cn/blog/_posts/2026/ingress-nginx-statement.md
++++ /dev/null
+@@ -1,111 +0,0 @@
+----
+-layout: blog
+-title: "Ingress NGINX：Kubernetes 指导委员会和安全响应委员会的声明"
+-date: 2026-01-29
+-slug: ingress-nginx-statement
+-author: >
+-  [Kat Cosgrove](https://github.com/katcosgrove)（指导委员会）
+-translator: >
+-  [Xin Li](https://github.com/my-git9)
+----
+-<!--
+-layout: blog
+-title: "Ingress NGINX: Statement from the Kubernetes Steering and Security Response Committees"
+-date: 2026-01-29
+-slug: ingress-nginx-statement
+-author: >
+-  [Kat Cosgrove](https://github.com/katcosgrove) (Steering Committee)
+--->
+-
+-<!--
+-**In March 2026, Kubernetes will retire Ingress NGINX, a piece of critical infrastructure for about half of cloud native environments.** 
+-The retirement of Ingress NGINX was [announced](https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/) for March 2026,
+-after years of [public warnings](https://groups.google.com/a/kubernetes.io/g/dev/c/rxtrKvT_Q8E/m/6_ej0c1ZBAAJ)
+-that the project was in dire need of contributors and maintainers.
+-There will be no more releases for bug fixes, security patches, or any updates of any kind after the project is retired.
+-This cannot be ignored, brushed off, or left until the last minute to address.
+-We cannot overstate the severity of this situation or the importance of beginning migration
+-to alternatives like [Gateway API](https://gateway-api.sigs.k8s.io/guides/getting-started/)
+-or one of the many [third-party Ingress controllers](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/) immediately.
+---->
+-**Kubernetes 将于 2026 年 3 月停止维护 Ingress NGINX，
+-该基础设施是大约一半云原生环境的关键组成部分。**
+-Ingress NGINX 的停止维护计划已于 2026 年 3 月正式宣布，此前多年来，
+-Kubernetes 一直公开警告该项目急需贡献者和维护者。
+-项目停止维护后，将不再发布任何错误修复、安全补丁或任何类型的更新。
+-此事不能被忽视、敷衍了事，更不能拖延到最后一刻才处理。
+-我们再怎么强调这种情况的严重性，以及立即开始迁移到替代方案
+-（例如 [Gateway API](https://gateway-api.sigs.k8s.io/guides/getting-started/)
+-或众多[第三方 Ingress 控制器](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/)）
+-的重要性都不为过。
+-
+-<!--
+-To be abundantly clear: choosing to remain with Ingress NGINX after its retirement leaves you and your users vulnerable to attack. None of the available alternatives are direct drop-in replacements. This will require planning and engineering time. Half of you will be affected. You have two months left to prepare.
+-
+-**Existing deployments will continue to work, so unless you proactively check, you may not know you are affected until you are compromised.** In most cases, you can check to find out whether or not you rely on Ingress NGINX by running `kubectl get pods --all-namespaces --selector app.kubernetes.io/name=ingress-nginx` with cluster administrator permissions.
+--->
+-必须明确指出：在 Ingress NGINX 退役后继续使用，将使你和你的用户面临攻击风险。
+-目前没有任何替代方案可以直接替换 Ingress NGINX。这需要规划和工程时间。
+-大约一半的用户会受到影响。你还有两个月的时间来准备。
+-
+-**现有部署将继续运行，因此，除非你主动检查，否则你可能直到系统遭到入侵才会意识到自己受到影响。**
+-在大多数情况下，你可以使用集群管理员权限运行
+-`kubectl get pods --all-namespaces --selector app.kubernetes.io/name=ingress-nginx`
+-命令，来检查你是否依赖于 Ingress NGINX。
+-
+-<!--
+-Despite its broad appeal and widespread use by companies of all sizes,
+-and repeated calls for help from the maintainers,
+-the Ingress NGINX project never received the contributors it so desperately needed.
+-According to internal Datadog research, about 50% of cloud native environments
+-currently rely on this tool, and yet for the last several years,
+-it has been maintained solely by one or two people working in their free time.
+-Without sufficient staffing to maintain the tool to a standard both ourselves
+-and our users would consider secure, the responsible choice is to wind it
+-down and refocus efforts on modern alternatives like [Gateway API](https://gateway-api.sigs.k8s.io/guides/getting-started/).
+--->
+-尽管 Ingress NGINX 项目广受欢迎，被各种规模的公司广泛使用，而且维护者也多次呼吁贡献者加入，
+-但它始终未能获得急需的贡献者。根据 Datadog 的内部研究，
+-目前约有 50% 的云原生环境依赖于该工具，然而在过去的几年里，
+-它一直由一两个人利用业余时间维护。
+-由于没有足够的人员来将该工具维护到我们和用户都认为安全的水平，
+-负责任的选择是逐步停止该项目，并将精力重新集中到诸如
+-[Gateway API](https://gateway-api.sigs.k8s.io/guides/getting-started/) 等现代替代方案上。
+-
+-<!--
+-We did not make this decision lightly; as inconvenient as it is now,
+-doing so is necessary for the safety of all users and the ecosystem as a whole.
+-Unfortunately, the flexibility Ingress NGINX was designed with, that was once a boon,
+-has become a burden that cannot be resolved. With the technical debt that has piled up,
+-and fundamental design decisions that exacerbate security flaws,
+-it is no longer reasonable or even possible to continue maintaining the tool even if resources did materialize.
+--->
+-我们做出这个决定并非轻率之举；尽管目前会带来诸多不便，
+-但为了所有用户和整个生态系统的安全，这是必要的。
+-遗憾的是，Ingress NGINX 最初设计的灵活性 —— 曾经是一大优势——如今却成了无法解决的负担。
+-由于技术债务不断累积，以及一些根本性的设计决策加剧了安全漏洞，即便未来资源到位，
+-继续维护该工具也已不再合理，甚至不可能。
+-
+-<!--
+-We issue this statement together to reinforce the scale of this change
+-and the potential for serious risk to a significant percentage of
+-Kubernetes users if this issue is ignored.
+-It is imperative that you check your clusters now.
+-If you are reliant on Ingress NGINX, you must begin planning for migration.
+--->
+-我们联合发布此声明，旨在强调此次变更的规模之大，
+-以及若忽视此问题可能对相当一部分 Kubernetes 用户造成严重风险。
+-你务必立即检查你的集群。如果你依赖 Ingress NGINX，则必须开始规划迁移。
+-
+-<!--
+-Thank you,
+-
+-Kubernetes Steering Committee
+-
+-Kubernetes Security Response Committee
+--->
+-谢谢，
+-
+-Kubernetes 指导委员会
+-
+-Kubernetes 安全响应委员会
+diff --git a/content/zh-cn/blog/_posts/2026/kubernetes-v1-36-sneak-peak.md b/content/zh-cn/blog/_posts/2026/kubernetes-v1-36-sneak-peak.md
+deleted file mode 100644
+index b16a41d78c..0000000000
+--- a/content/zh-cn/blog/_posts/2026/kubernetes-v1-36-sneak-peak.md
++++ /dev/null
+@@ -1,338 +0,0 @@
+----
+-layout: blog
+-title: 'Kubernetes v1.36 抢先一览'
+-date: 2026-03-30
+-slug: kubernetes-v1-36-sneak-peek
+-author: >
+-  Chad Crowell,
+-  Kirti Goyal,
+-  Sophia Ugochukwu,
+-  Swathi Rao,
+-  Utkarsh Umre
+-translator: >
+-  [Paco Xu](https://github.com/pacoxu)
+----
+-<!--
+-layout: blog
+-title: 'Kubernetes v1.36 Sneak Peek'
+-date: 2026-03-30
+-slug: kubernetes-v1-36-sneak-peek
+-author: >
+-  Chad Crowell,
+-  Kirti Goyal,
+-  Sophia Ugochukwu,
+-  Swathi Rao,
+-  Utkarsh Umre
+--->
+-
+-<!--
+-Kubernetes v1.36 is coming at the end of April 2026. This release will include removals and deprecations, and it is packed with an impressive number of
+-enhancements. Here are some of the features we are most excited about in this cycle!
+-
+-Please note that this information reflects the current state of v1.36 development and may change before release.
+--->
+-Kubernetes v1.36 将于 2026 年 4 月底发布。
+-本次发布将包含移除和弃用项，并带来数量可观的增强功能。
+-以下是我们在这个发布周期中最期待的一些特性。
+-
+-请注意，本文信息反映的是 v1.36 开发的当前状态，发布前仍可能发生变化。
+-
+-<!--
+-## The Kubernetes API removal and deprecation process
+--->
+-## Kubernetes API 的移除与弃用流程 {#the-kubernetes-api-removal-and-deprecation-process}
+-
+-<!--
+-The Kubernetes project has a well-documented [deprecation policy](/docs/reference/using-api/deprecation-policy/) for features. This policy states that stable APIs
+-may only be deprecated when a newer, stable version of that same API is available and that APIs have a minimum lifetime for each stability level. A deprecated API
+-has been marked for removal in a future Kubernetes release. It will continue to function until removal (at least one year from the deprecation), but usage will
+-result in a warning being displayed. Removed APIs are no longer available in the current version, at which point you must migrate to using the replacement.
+--->
+-Kubernetes 项目针对功能有一套文档完善的[弃用策略](/zh-cn/docs/reference/using-api/deprecation-policy/)。
+-该策略规定，稳定版 API 只有在有新的稳定替代版本时才会被弃用，并且 API 在每个稳定级别都有最短生命周期。
+-被弃用的 API 会被标记为将在未来 Kubernetes 版本中移除。
+-它在移除前会继续工作（自弃用起至少一年），但使用时会显示告警。
+-被移除的 API 在当前版本中将不再可用，此时你必须迁移到替代方案。
+-
+-<!--
+-- Generally available (GA) or stable API versions may be marked as deprecated but must not be removed within a major version of Kubernetes.
+-- Beta or pre-release API versions must be supported for 3 releases after the deprecation.
+-- Alpha or experimental API versions may be removed in any release without prior deprecation notice; this process can become a withdrawal in cases where a different implementation for the same feature is already in place.
+--->
+-- 正式可用（GA）或稳定版 API 可以标记为弃用，但不得在 Kubernetes 的一个主版本内被移除。
+-- Beta 或预发布 API 版本在弃用后必须继续支持 3 个版本。
+-- Alpha 或实验性 API 版本可以在任何版本中移除，无需提前发出弃用通知；在同一功能已有不同实现时，此过程也可能变为撤回。
+-
+-<!--
+-Whether an API is removed as a result of a feature graduating from beta to stable, or because that API simply did not succeed, all removals comply with this
+-deprecation policy. Whenever an API is removed, migration options are communicated in the [deprecation guide](/docs/reference/using-api/deprecation-guide/).
+--->
+-无论 API 被移除是因为某功能从 beta 晋升到稳定，还是因为该 API 本身未能成功升级，所有移除都遵循这一弃用策略。
+-每当 API 被移除时，[弃用指南](/zh-cn/docs/reference/using-api/deprecation-guide/)都会提供迁移选项。
+-
+-<!--
+-A recent example of this principle in action is the retirement of the ingress-nginx project, announced
+-by SIG-Security on March 24, 2026. As stewardship shifts away from the project, the community has been
+-encouraged to evaluate alternative ingress controllers that align with current security and maintenance
+-best practices. This transition reflects the same lifecycle discipline that underpins Kubernetes itself,
+-ensuring continued evolution without abrupt disruption.
+--->
+-这一原则近期的一个实践案例是 ingress-nginx 项目的退役，该消息由 SIG-Security 于 2026 年 3 月 24 日宣布。
+-随着项目维护权发生变化，社区被鼓励评估符合当前安全与维护最佳实践的替代的 Ingress 控制器实现。
+-这一过渡体现了支撑 Kubernetes 本身的同一生命周期原则，
+-确保持续演进且不造成突发中断。
+-
+-<!--
+-## Ingress NGINX retirement
+--->
+-## Ingress NGINX 退役 {#ingress-nginx-retirement}
+-
+-<!--
+-To prioritize the safety and security of the ecosystem, Kubernetes SIG Network and the Security Response Committee have retired Ingress NGINX on March 24, 2026.
+-Since that date, there have been no further releases, no bugfixes, and no updates to resolve any security vulnerabilities discovered. Existing deployments of
+-Ingress NGINX will continue to function, and installation artifacts like Helm charts and container images will remain available.
+-
+-For full details, see the [official retirement announcement](/blog/2025/11/11/ingress-nginx-retirement/).
+--->
+-为优先保障生态系统的安全，Kubernetes SIG Network 和安全响应委员会（Security Response Committee）
+-已于 2026 年 3 月 24 日退役 Ingress NGINX。
+-自该日期起，不再发布后续版本、不再修复缺陷，也不再更新以修复新发现的安全漏洞。
+-现有 Ingress NGINX 部署将继续运行，Helm Chart 和容器镜像等安装制品也将继续可用。
+-
+-完整详情请参阅[官方退役公告](/blog/2025/11/11/ingress-nginx-retirement/)。
+-
+-<!--
+-## Deprecations and removals for Kubernetes v1.36
+--->
+-## Kubernetes v1.36 的弃用和移除 {#deprecations-and-removals-for-kubernetes-v136}
+-
+-<!--
+-### Deprecation of `.spec.externalIPs` in Service
+--->
+-### Service 中 `.spec.externalIPs` 的弃用 {#deprecation-of-specexternalips-in-service}
+-
+-<!--
+-The `externalIPs` field in Service `spec` is being deprecated, which means you’ll soon lose a quick way to route arbitrary externalIPs to your Services. This
+-field has been a known security headache for years, enabling man-in-the-middle attacks on your cluster traffic, as documented in [CVE-2020-8554](https://github.com/kubernetes/kubernetes/issues/970760). From Kubernetes v1.36 and onwards, you will see deprecation warnings when using it, with full removal
+-planned for v1.43.
+-
+-If your Services still lean on `externalIPs`, consider using LoadBalancer services for cloud-managed ingress, NodePort for simple port exposure, or Gateway API
+-for a more flexible and secure way to handle external traffic.
+-
+-For more details on this enhancement, refer to [KEP-5707: Deprecate service.spec.externalIPs](https://kep.k8s.io/5707)
+--->
+-Service `spec` 中的 `externalIPs` 字段正在被弃用，这意味着你很快将失去把任意 externalIPs 路由到 Service 的快捷方式。
+-这个字段多年来一直是已知的安全隐患，会让集群流量面临中间人攻击风险，如 [CVE-2020-8554](https://github.com/kubernetes/kubernetes/issues/970760) 所述。
+-Kubernetes v1.36 起该字段会触发弃用告警，并计划在 v1.43 移除。
+-
+-如果你的 Service 仍依赖 `externalIPs`，可考虑使用 LoadBalancer 服务处理云托管入口、使用 NodePort 做简单端口暴露，
+-或使用 Gateway API 以更灵活且更安全的方式处理外部流量。
+-
+-关于此增强功能的更多细节，请参阅 [KEP-5707：弃用 service.spec.externalIPs](https://kep.k8s.io/5707)
+-
+-<!--
+-### Removal of `gitRepo` volume driver
+--->
+-### `gitRepo` 卷驱动的移除 {#removal-of-gitrepo-volume-driver}
+-
+-<!--
+-The gitRepo volume type has been deprecated since v1.11. Starting Kubernetes v1.36, the `gitRepo` volume plugin is permanently disabled and cannot be turned back
+-on. This change protects clusters from a critical security issue where using `gitRepo` could let an attacker run code as root on the node.
+-
+-Although `gitRepo` has been deprecated for years and better alternatives have been recommended, it was still technically possible to use it in previous releases.
+-From v1.36 onward, that path is closed for good, so any existing workloads depending on `gitRepo` will need to migrate to supported approaches such as init
+-containers or external git-sync style tools.
+-
+-For more details on this enhancement, refer to [KEP-5040: Remove gitRepo volume driver](https://kep.k8s.io/5040)
+--->
+-`gitRepo` 卷类型自 v1.11 起已被弃用。
+-从 Kubernetes v1.36 开始，`gitRepo` 卷插件将被永久禁用，且无法重新启用。
+-此变更可保护集群免受关键安全问题影响，因为使用 `gitRepo` 可能让攻击者以 root 身份在节点上运行代码。
+-
+-尽管 `gitRepo` 多年来一直处于弃用状态，且已有更好的替代方案被推荐，但在此前版本中它在技术上仍可使用。
+-从 v1.36 开始，这条路径将被永久关闭，因此任何依赖 `gitRepo` 的现有工作负载都需要迁移到受支持方案，例如 init 容器或外部 git-sync 风格工具。
+-
+-关于此增强功能的更多细节，请参阅 [KEP-5040：移除 gitRepo 卷驱动](https://kep.k8s.io/5040)
+-
+-<!--
+-## Featured enhancements of Kubernetes v1.36
+-
+-The following list of enhancements is likely to be included in the upcoming v1.36 release. This is not a commitment and the release content is subject to change.
+--->
+-## Kubernetes v1.36 的重点增强功能 {#featured-enhancements-of-kubernetes-v136}
+-
+-以下增强功能很可能包含在即将发布的 v1.36 中。
+-这不是承诺，发布内容仍可能发生变化。
+-
+-<!--
+-### Faster SELinux labelling for volumes (GA) {#volume-selinux-labelling}
+-
+-Kubernetes v1.36 makes the SELinux volume mounting improvement generally available. This change replaced recursive file relabeling with `mount -o context=XYZ` option, applying the correct SELinux label to the entire volume at mount time. It brings more consistent performance and reduces Pod startup delays on SELinux-enforcing systems.
+-
+-This feature was introduced as beta in v1.28 for `ReadWriteOncePod` volumes. In v1.32, it gained metrics and an opt-out option
+-(`securityContext.seLinuxChangePolicy: Recursive`) to help catch conflicts. Now in v1.36, it reaches stable and defaults to all volumes, with Pods or
+-CSIDrivers opting in via `spec.SELinuxMount`.
+-
+-However, we expect this feature to create the risk of breaking changes in the future Kubernetes releases, due to the potential for mixing of privileged and unprivileged pods.
+-Setting the `seLinuxChangePolicy` field and
+-SELinux volume labels on Pods, correctly, is the responsibility of the Pod author
+-Developers have that responsibility whether they are writing a Deployment, StatefulSet, DaemonSet or even a custom resource that includes a Pod template.
+-Being careless
+-with these settings can lead to a range of problems when Pods share volumes.
+-
+-For more details on this enhancement, refer to  [KEP-1710: Speed up recursive SELinux label change](https://kep.k8s.io/1710)
+--->
+-### 卷的 SELinux 标签提速（GA） {#volume-selinux-labelling}
+-
+-Kubernetes v1.36 将 SELinux 卷挂载改进提升为正式可用。
+-此变更用 `mount -o context=XYZ` 选项替代了递归文件重标记，在挂载时为整个卷应用正确的 SELinux 标签。
+-它带来更一致的性能，并减少启用 SELinux 强制模式系统上的 Pod 启动延迟。
+-
+-该功能在 v1.28 作为 beta 引入，适用于 `ReadWriteOncePod` 卷。
+-在 v1.32，它新增了指标和退出选项
+-（`securityContext.seLinuxChangePolicy: Recursive`）以帮助发现冲突。
+-现在在 v1.36 进入稳定阶段，并将该机制扩展为默认面向所有卷；
+-Pod 或 CSIDriver 可通过 `spec.SELinuxMount` 显式启用。
+-
+-不过，我们预计该功能在未来 Kubernetes 版本中可能带来破坏性变更风险，原因是可能混用特权和非特权 Pod。
+-正确设置 Pod 上的 `seLinuxChangePolicy` 字段和 SELinux 卷标签，是 Pod 作者的责任。
+-无论开发者是在编写 Deployment、StatefulSet、DaemonSet，还是包含 Pod 模板的自定义资源，都需要承担这一责任。
+-对这些设置不够谨慎会在 Pod 共享卷时导致一系列问题。
+-
+-关于此增强功能的更多细节，请参阅 [KEP-1710：加快递归 SELinux 标签变更](https://kep.k8s.io/1710)
+-
+-<!--
+-### External signing of ServiceAccount tokens
+-
+-As a beta feature, Kubernetes already supports external signing of ServiceAccount tokens. This allows clusters to integrate with external key management systems
+-or signing services instead of relying only on internally managed keys.
+-
+-With this enhancement, the `kube-apiserver` can delegate token signing to external systems such as cloud key management services or hardware security modules. This
+-improves security and simplifies key management services for clusters that rely on centralized signing infrastructure.
+-We expect that this will graduate to stable (GA) in Kubernetes v1.36.
+-
+-For more details on this enhancement, refer to [KEP-740: Support external signing of service account tokens](https://kep.k8s.io/740)
+--->
+-### ServiceAccount Token 的外部签名 {#external-signing-of-serviceaccount-tokens}
+-
+-作为 beta 功能，Kubernetes 已支持 ServiceAccount Token 的外部签名。
+-这使集群可以集成外部密钥管理系统或签名服务，而不只依赖内部管理密钥。
+-
+-通过这一增强，`kube-apiserver` 可以将令牌签名委托给外部系统，例如云密钥管理服务或硬件安全模块。
+-这提升了安全性，并简化了依赖集中式签名基础设施的集群的密钥管理。
+-我们预计它将在 Kubernetes v1.36 升级为稳定（GA）。
+-
+-关于此增强功能的更多细节，请参阅 [KEP-740：支持服务账户令牌的外部签名](https://kep.k8s.io/740)
+-
+-<!--
+-### DRA Driver support for Device taints and tolerations
+-
+-Kubernetes v1.33 introduced support for taints and tolerations for physical devices managed through [Dynamic Resource Allocation (DRA)](/docs/concepts/scheduling-eviction/dynamic-resource-allocation/). Normally, any device can be
+-used for scheduling. However, this enhancement allows DRA drivers to mark devices as tainted, which ensures that they will not be used for scheduling purposes.
+-Alternatively, cluster administrators can create a `DeviceTaintRule` to mark devices that match a certain selection criteria(such as all devices of a certain
+-driver) as tainted. This improves scheduling control and helps ensure that specialized hardware resources are only used by workloads that explicitly request them.
+-
+-In Kubernetes v1.36, this feature graduates to beta with more comprehensive testing complete, making it accessible by default without the need for a feature
+-flag and open to user feedback.
+-
+-To learn about taints and tolerations, see [taints and tolerations](/docs/concepts/scheduling-eviction/taint-and-toleration/).
+-For more details on this enhancement, refer to [KEP-5055: DRA: device taints and tolerations](https://kep.k8s.io/5055).
+--->
+-### DRA 驱动对设备污点和容忍的支持 {#dra-driver-support-for-device-taints-and-tolerations}
+-
+-Kubernetes v1.33 引入了对通过[动态资源分配（DRA）](/zh-cn/docs/concepts/scheduling-eviction/dynamic-resource-allocation/)管理的物理设备的污点和容忍支持。
+-通常，任何设备都可用于调度。
+-但这一增强允许 DRA 驱动将设备标记为污点，从而确保这些设备不会用于调度。
+-或者，集群管理员可创建 `DeviceTaintRule`，将符合特定选择条件（例如某个驱动的所有设备）的设备标记为污点。
+-这改进了调度控制，并有助于确保专用硬件资源仅被显式请求它们的工作负载使用。
+-
+-在 Kubernetes v1.36 中，该功能在完成更全面测试后升级为 beta，默认可用，无需功能开关，并向用户反馈开放。
+-
+-要了解污点和容忍，请参阅[污点和容忍](/zh-cn/docs/concepts/scheduling-eviction/taint-and-toleration/)。
+-关于此增强功能的更多细节，请参阅 [KEP-5055：DRA：设备污点和容忍](https://kep.k8s.io/5055)。
+-
+-<!--
+-### DRA support for partitionable devices
+-
+-Kubernetes v1.36 expands Dynamic Resource Allocation (DRA) by introducing support for partitionable devices, allowing a single hardware accelerator to be split
+-into multiple logical units that can be shared across workloads.  This is especially useful for high-cost resources like GPUs, where dedicating an entire device
+-to a single workload can lead to underutilization.
+-
+-With this enhancement, platform teams can improve overall cluster efficiency by allocating only the required portion of a device to each workload, rather than
+-reserving it entirely. This makes it easier to run multiple workloads on the same hardware while maintaining isolation and control, helping organizations get more
+-value out of their infrastructure.
+-
+-To learn more about this enhancement, refer to [KEP-4815: DRA Partitionable Devices](https://kep.k8s.io/4815)
+--->
+-### DRA 对可分区设备的支持 {#dra-support-for-partitionable-devices}
+-
+-Kubernetes v1.36 通过引入对可分区设备的支持扩展了动态资源分配（DRA），
+-允许将单个硬件加速器拆分为多个可在工作负载之间共享的逻辑单元。
+-这对 GPU 等高成本资源尤其有用，因为将整个设备独占给单个工作负载可能导致利用不足。
+-
+-通过这一增强，平台团队可以通过仅为每个工作负载分配所需设备份额来提升整体集群效率，而不是完整预留设备。
+-这使得在保持隔离和控制的同时，更容易在同一硬件上运行多个工作负载，
+-帮助组织从其基础设施中获得更多价值。
+-
+-要了解更多信息，请参阅 [KEP-4815：DRA 可分区设备](https://kep.k8s.io/4815)
+-
+-<!--
+-## Want to know more?
+-
+-New features and deprecations are also announced in the Kubernetes release notes. We will formally announce what's new in [Kubernetes v1.36](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.36.md) as part of the CHANGELOG for that release.
+-
+-Kubernetes v1.36 release is planned for Wednesday, April 22, 2026. Stay tuned for updates!
+-
+-You can also see the announcements of changes in the release notes for:
+--->
+-## 想了解更多？ {#want-to-know-more}
+-
+-Kubernetes 发布说明也会发布新功能和弃用信息。
+-我们将在该版本的 CHANGELOG 中正式公布 [Kubernetes v1.36](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.36.md) 的更新内容。
+-
+-Kubernetes v1.36 计划于 2026 年 4 月 22 日（周三）发布。请持续关注后续更新。
+-
+-你也可以在以下版本的发布说明中查看变更公告：
+-
+-<!--
+-- [Kubernetes v1.35](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.35.md)
+-- [Kubernetes v1.34](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.34.md)
+-- [Kubernetes v1.33](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.33.md)
+-- [Kubernetes v1.32](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.32.md)
+-- [Kubernetes v1.31](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.31.md)
+-- [Kubernetes v1.30](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.30.md)
+--->
+-- [Kubernetes v1.35](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.35.md)
+-- [Kubernetes v1.34](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.34.md)
+-- [Kubernetes v1.33](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.33.md)
+-- [Kubernetes v1.32](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.32.md)
+-- [Kubernetes v1.31](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.31.md)
+-- [Kubernetes v1.30](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.30.md)
+-
+-<!--
+-## Get involved
+-
+-The simplest way to get involved with Kubernetes is by joining one of the many [Special Interest Groups](https://github.com/kubernetes/community/blob/master/siglist.md) (SIGs) that align with your interests. Have something you’d like to broadcast to the Kubernetes community? Share your voice at our weekly
+-[community meeting](https://github.com/kubernetes/community/tree/master/communication), and through the channels below. Thank you for your continued feedback and support.
+-
+-- Follow us on Bluesky [@kubernetes.io](https://bsky.app/profile/kubernetes.io) for the latest updates
+-- Join the community discussion on [Discuss](https://discuss.kubernetes.io/)
+-- Join the community on [Slack](http://slack.k8s.io/)
+-- Post questions (or answer questions) on [Server Fault](https://serverfault.com/questions/tagged/kubernetes) or [Stack Overflow](http://stackoverflow.com/questions/tagged/kubernetes)
+-- Share your Kubernetes [story](https://docs.google.com/a/linuxfoundation.org/forms/d/e/1FAIpQLScuI7Ye3VQHQTwBASrgkjQDSS5TP0g3AXfFhwSM9YpHgxRKFA/viewform)
+-- Read more about what’s happening with Kubernetes on the [blog](https://kubernetes.io/blog/)
+-- Learn more about the [Kubernetes Release Team](https://github.com/kubernetes/sig-release/tree/master/release-team)
+--->
+-## 参与其中 {#get-involved}
+-
+-参与 Kubernetes 最简单的方式是加入与你兴趣匹配的众多[特别兴趣小组](https://github.com/kubernetes/community/blob/master/siglist.md)（SIG）之一。
+-如果你有想向 Kubernetes 社区分享的内容，欢迎在我们的每周[社区会议](https://github.com/kubernetes/community/tree/master/communication)
+-以及下列渠道中发声。感谢你持续的反馈与支持。
+-
+-- 在 Bluesky 关注我们 [@kubernetes.io](https://bsky.app/profile/kubernetes.io) 获取最新动态
+-- 在 [Discuss](https://discuss.kubernetes.io/) 加入社区讨论
+-- 在 [Slack](http://slack.k8s.io/) 加入社区
+-- 在 [Server Fault](https://serverfault.com/questions/tagged/kubernetes) 或 [Stack Overflow](https://stackoverflow.com/questions/tagged/kubernetes) 提问（或回答问题）
+-- 分享你的 Kubernetes [故事](https://docs.google.com/a/linuxfoundation.org/forms/d/e/1FAIpQLScuI7Ye3VQHQTwBASrgkjQDSS5TP0g3AXfFhwSM9YpHgxRKFA/viewform)
+-- 在[博客](https://kubernetes.io/blog/)阅读更多 Kubernetes 最新动态
+-- 进一步了解 [Kubernetes Release Team](https://github.com/kubernetes/sig-release/tree/master/release-team)
+diff --git a/content/zh-cn/docs/concepts/configuration/liveness-readiness-startup-probes.md b/content/zh-cn/docs/concepts/configuration/liveness-readiness-startup-probes.md
+index f0e0fb7aa9..41381283ba 100644
+--- a/content/zh-cn/docs/concepts/configuration/liveness-readiness-startup-probes.md
++++ b/content/zh-cn/docs/concepts/configuration/liveness-readiness-startup-probes.md
+@@ -12,51 +12,20 @@ weight: 40
+ <!-- overview -->
+ 
+ <!--
+-Kubernetes lets you define _probes_ to continuously monitor the health of containers in a Pod.
+-Based on probe results, Kubernetes can restart unhealthy containers or stop sending traffic to containers that are not ready.
++Kubernetes has various types of probes:
+ 
+-There are three types of probes, each serving a different purpose:
+--->
+-Kubernetes 允许你定义**探针**来持续监控 Pod 中容器的健康状况。
+-根据探针结果，Kubernetes 可以重启不健康的容器，或者停止向未就绪的容器发送流量。
+-
+-探针分为三种类型，每种类型都有不同的用途：
+-
+-<!---
+-- [Startup probe](#startup-probe)
+ - [Liveness probe](#liveness-probe)
+ - [Readiness probe](#readiness-probe)
++- [Startup probe](#startup-probe)
+ -->
+-- [启动探针](#startup-probe)
++Kubernetes 提供了多种探针：
++
+ - [存活探针](#liveness-probe)
+ - [就绪探针](#readiness-probe)
++- [启动探针](#startup-probe)
+ 
+ <!-- body -->
+ 
+-<!--
+-## Startup probe
+-
+-A startup probe verifies whether the application within a container is started. This can be used to adopt liveness checks on slow starting containers, avoiding them getting killed by the kubelet before they are up and running.
+--->
+-## 启动探针   {#startup-probe}
+-
+-启动探针检查容器内的应用是否已启动。
+-启动探针可以用于对慢启动容器进行存活性检测，避免它们在启动运行之前就被 kubelet 杀掉。
+-
+-<!--
+-If such a probe is configured, it disables liveness and readiness checks until it succeeds.
+--->
+-如果配置了这类探针，它会禁用存活检测和就绪检测，直到启动探针成功为止。
+-
+-<!--
+-This type of probe is only executed at startup, unlike liveness and readiness probes, which are run periodically.
+-
+-* Read more about the [Configure Liveness, Readiness and Startup Probes](/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes).
+--->
+-这类探针仅在启动时执行，不像存活探针和就绪探针那样周期性地运行。
+-
+-* 更多细节参阅[配置存活探针、就绪探针和启动探针](/zh-cn/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes)。
+-
+ <!--
+ ## Liveness probe
+ 
+@@ -99,3 +68,27 @@ Readiness probes run on the container during its whole lifecycle.
+ 如果就绪探针返回的状态为失败，Kubernetes 会将该 Pod 从所有对应服务的端点中移除。
+ 
+ 就绪探针在容器的整个生命期内持续运行。
++
++<!--
++## Startup probe
++
++A startup probe verifies whether the application within a container is started. This can be used to adopt liveness checks on slow starting containers, avoiding them getting killed by the kubelet before they are up and running.
++-->
++## 启动探针   {#startup-probe}
++
++启动探针检查容器内的应用是否已启动。
++启动探针可以用于对慢启动容器进行存活性检测，避免它们在启动运行之前就被 kubelet 杀掉。
++
++<!--
++If such a probe is configured, it disables liveness and readiness checks until it succeeds.
++-->
++如果配置了这类探针，它会禁用存活检测和就绪检测，直到启动探针成功为止。
++
++<!--
++This type of probe is only executed at startup, unlike liveness and readiness probes, which are run periodically.
++
++* Read more about the [Configure Liveness, Readiness and Startup Probes](/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes).
++-->
++这类探针仅在启动时执行，不像存活探针和就绪探针那样周期性地运行。
++
++* 更多细节参阅[配置存活、就绪和启动探针](/zh-cn/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes)。
+diff --git a/content/zh-cn/docs/contribute/participate/_index.md b/content/zh-cn/docs/contribute/participate/_index.md
+index 1273ab90b5..470f2c759a 100644
+--- a/content/zh-cn/docs/contribute/participate/_index.md
++++ b/content/zh-cn/docs/contribute/participate/_index.md
+@@ -5,7 +5,6 @@ weight: 60
+ card:
+   name: contribute
+   weight: 60
+-no_list: true
+ ---
+ <!--
+ title: Participating in SIG Docs
+@@ -14,7 +13,6 @@ weight: 60
+ card:
+   name: contribute
+   weight: 60
+-no_list: true
+ -->
+ 
+ <!-- overview -->
+@@ -156,8 +154,9 @@ descendants. For more information about OWNERS files in general, see
+ [OWNERS](https://github.com/kubernetes/community/blob/master/contributors/guide/owners.md).
+ -->
+ OWNERS 文件包含 SIG Docs 评阅人和批准人的列表。
+-OWNERS 文件也可以存在于子目录中，可以在子目录层级重新设置哪些人可以作为评阅人和批准人，
+-并将这一设定传递到下层子目录。关于 OWNERS 的更多信息，请参考
++OWNERS 文件也可以存在于子目录中，可以在子目录层级重新设置哪些人可以作为评阅人和
++批准人，并将这一设定传递到下层子目录。
++关于 OWNERS 的更多信息，请参考
+ [OWNERS](https://github.com/kubernetes/community/blob/master/contributors/guide/owners.md)
+ 文档。
+ 
+@@ -182,14 +181,7 @@ When a pull request is merged to the branch used to publish content, that conten
+ is published to https://kubernetes.io. To ensure that
+ the quality of our published content is high, we limit merging pull requests to
+ SIG Docs approvers. Here's how it works.
+--->
+-## PR 是怎样被合并的 {#how-merging-works}
+ 
+-当某个拉取请求（PR）被合并到用来发布内容的分支，对应的内容就会被发布到 https://kubernetes.io。
+-为了确保我们所发布的内容的质量足够好，合并 PR 的权限仅限于
+-SIG Docs 批准人。下面是合并的工作机制：
+-
+-<!--
+ - When a pull request has both the `lgtm` and `approve` labels, has no `hold`
+   labels, and all tests are passing, the pull request merges automatically.
+ - Kubernetes organization members and SIG Docs approvers can add comments to
+@@ -201,6 +193,12 @@ SIG Docs 批准人。下面是合并的工作机制：
+   specific roles, such as [PR Wrangler](/docs/contribute/participate/pr-wranglers/) or
+   [SIG Docs chairperson](#sig-docs-chairperson).
+ -->
++## PR 是怎样被合并的 {#how-merging-works}
++
++当某个拉取请求（PR）被合并到用来发布内容的分支，对应的内容就会被发布到 https://kubernetes.io。
++为了确保我们所发布的内容的质量足够好，合并 PR 的权限仅限于
++SIG Docs 批准人。下面是合并的工作机制：
++
+ - 当某个 PR 同时具有 `lgtm` 和 `approve` 标签，没有 `hold` 标签且通过所有测试时，
+   该 PR 会被自动合并。
+ - Kubernetes 组织的成员和 SIG Docs 批准人可以添加评论以阻止给定 PR 的自动合并，
+@@ -208,24 +206,11 @@ SIG Docs 批准人。下面是合并的工作机制：
+ - 所有 Kubernetes 成员可以通过 `/lgtm` 评论添加 `lgtm` 标签。
+ - 只有 SIG Docs 批准人可以通过评论 `/approve` 合并 PR。
+   某些批准人还会执行一些其他角色，例如
+-  [PR 管理者](/zh-cn/docs/contribute/participate/pr-wranglers/)或
++  [PR 管理者](/zh-cn/docs/contribute/participate/pr-wranglers/) 或
+   [SIG Docs 主席](#sig-docs-chairperson)等。
+ 
+ ## {{% heading "whatsnext" %}}
+ 
+-<!--
+-To learn more about participating in SIG Docs, see:
+-
+-- [Roles and responsibilities](/docs/contribute/participate/roles-and-responsibilities/)
+-- [Issue wranglers](/docs/contribute/participate/issue-wrangler/)
+-- [PR wranglers](/docs/contribute/participate/pr-wranglers/)
+--->
+-要了解更多关于参与 SIG Docs 的信息，请参阅：
+-
+-- [角色和职责](/zh-cn/docs/contribute/participate/roles-and-responsibilities/)
+-- [Issue 管理员](/zh-cn/docs/contribute/participate/issue-wrangler/)
+-- [PR 管理员](/zh-cn/docs/contribute/participate/pr-wranglers/)
+-
+ <!--
+ For more information about contributing to the Kubernetes documentation, see:
+ 
+diff --git a/i18n/pl/pl.toml b/i18n/pl/pl.toml
+index 8758bc6899..7fe9b820f1 100644
+--- a/i18n/pl/pl.toml
++++ b/i18n/pl/pl.toml
+@@ -477,9 +477,6 @@ other = "Ten artykuł ma już ponad rok, a starsze teksty mogą zawierać nieakt
+ [page_deprecated]
+ other = "(nieaktualna strona)"
+ 
+-[page_not_available_in_language]
+-other = "Ta strona nie jest dostępna dla wybranego języka ({{ .Language }})"
+-
+ [parentoptions_heading]
+ other = "Odziedziczone opcje nadrzędne"
+ 
